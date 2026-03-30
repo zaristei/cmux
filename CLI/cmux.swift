@@ -376,7 +376,10 @@ private final class ClaudeHookSessionStore {
         lastBody: String? = nil
     ) throws {
         let normalized = normalizeSessionId(sessionId)
-        guard !normalized.isEmpty else { return }
+        guard !normalized.isEmpty else {
+            fputs("warning: claude-hook: empty session ID after normalization\n", stderr)
+            return
+        }
         try withLockedState { state in
             let now = Date().timeIntervalSince1970
             var record = state.sessions[normalized] ?? ClaudeHookSessionRecord(
@@ -444,7 +447,14 @@ private final class ClaudeHookSessionStore {
     ) -> ClaudeHookSessionRecord? {
         if let surfaceId {
             let matches = sessions.filter { $0.surfaceId == surfaceId }
-            return matches.max(by: { $0.updatedAt < $1.updatedAt })
+            if matches.count <= 1 { return matches.first }
+            // Multiple sessions on the same surface: prefer one with a live PID
+            let alive = matches.filter { record in
+                guard let pid = record.pid, pid > 0 else { return false }
+                return kill(Int32(pid), 0) == 0
+            }
+            let candidates = alive.isEmpty ? matches : alive
+            return candidates.max(by: { $0.updatedAt < $1.updatedAt })
         }
         if let workspaceId {
             let matches = sessions.filter { $0.workspaceId == workspaceId }
@@ -463,8 +473,12 @@ private final class ClaudeHookSessionStore {
         }
         defer { Darwin.close(fd) }
 
-        if flock(fd, LOCK_EX) != 0 {
-            throw CLIError(message: "Failed to lock Claude hook state: \(lockPath)")
+        let lockDeadline = Date().addingTimeInterval(2.0)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            if Date() > lockDeadline {
+                throw CLIError(message: "Claude hook state lock timeout: \(lockPath)")
+            }
+            usleep(50_000) // 50ms
         }
         defer { _ = flock(fd, LOCK_UN) }
 
@@ -11544,10 +11558,7 @@ struct CMUXCLI {
             "surface index not found",
             "unable to resolve surface id",
             "panel not found",
-            "tab not found",
-            "failed to write to socket",
-            "socket read error",
-            "not connected"
+            "tab not found"
         ]
         return benignFragments.contains { message.contains($0) }
     }
@@ -11938,7 +11949,6 @@ struct CMUXCLI {
             firstString(in: object, keys: ["message", "body", "text", "prompt", "error", "description"]),
             firstString(in: nested, keys: ["message", "body", "text", "prompt", "error", "description"])
         ]
-        let session = firstString(in: object, keys: ["session_id", "sessionId"])
         let message = messageCandidates.compactMap { $0 }.first ?? "Claude needs your input"
         let normalizedMessage = normalizedSingleLine(message)
         let signal = signalParts.compactMap { $0 }.joined(separator: " ")
