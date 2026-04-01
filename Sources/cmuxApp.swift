@@ -3828,6 +3828,28 @@ enum TelemetrySettings {
     static let enabledForCurrentLaunch = isEnabled()
 }
 
+enum UIFontScaleSettings {
+    static let key = "uiZoomLevel"
+    static let defaultZoomLevel: Double = 0
+    static let zoomStep: Double = 1
+
+    /// Converts a zoom level to a scale factor using `1.2 ^ level` (same formula as VS Code / Chromium).
+    static func scale(for zoomLevel: Double) -> Double {
+        pow(1.2, zoomLevel)
+    }
+
+    /// Reads the current zoom level from UserDefaults.
+    static func currentZoomLevel() -> Double {
+        let raw = UserDefaults.standard.double(forKey: key)
+        return raw
+    }
+
+    /// Reads the current scale factor from UserDefaults.
+    static func currentScale() -> Double {
+        scale(for: currentZoomLevel())
+    }
+}
+
 struct SettingsView: View {
     private let contentTopInset: CGFloat = 8
     private let pickerColumnWidth: CGFloat = 196
@@ -3906,6 +3928,7 @@ struct SettingsView: View {
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
     @AppStorage("sidebarTintOpacity") private var sidebarTintOpacity = SidebarTintDefaults.opacity
     @AppStorage("sidebarMatchTerminalBackground") private var sidebarMatchTerminalBackground = false
+    @AppStorage(UIFontScaleSettings.key) private var uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
 
     @ObservedObject private var notificationStore = TerminalNotificationStore.shared
     @State private var shortcutResetToken = UUID()
@@ -5107,7 +5130,39 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardRow(
-                            String(localized: "settings.sidebarAppearance.reset", defaultValue: "Reset Sidebar Tint"),
+                            String(localized: "settings.sidebarAppearance.uiZoomLevel", defaultValue: "UI Zoom Level"),
+                            subtitle: String(localized: "settings.sidebarAppearance.uiZoomLevel.subtitle", defaultValue: "Scale sidebar and tab bar text. Use ⌘= / ⌘- to adjust. Does not affect terminal font size.")
+                        ) {
+                            HStack(spacing: 8) {
+                                Button {
+                                    uiZoomLevel -= UIFontScaleSettings.zoomStep
+                                } label: {
+                                    Image(systemName: "minus")
+                                        .frame(width: 20, height: 20)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Text(String(format: "%.0f%%", UIFontScaleSettings.scale(for: uiZoomLevel) * 100))
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 44, alignment: .center)
+
+                                Button {
+                                    uiZoomLevel += UIFontScaleSettings.zoomStep
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .frame(width: 20, height: 20)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            String(localized: "settings.sidebarAppearance.reset", defaultValue: "Reset Sidebar Appearance"),
                             subtitle: String(localized: "settings.sidebarAppearance.reset.subtitle", defaultValue: "Restore default sidebar appearance.")
                         ) {
                             Button(String(localized: "settings.sidebarAppearance.reset.button", defaultValue: "Reset")) {
@@ -5115,6 +5170,7 @@ struct SettingsView: View {
                                 sidebarTintHexDark = nil
                                 sidebarTintHex = SidebarTintDefaults.hex
                                 sidebarTintOpacity = SidebarTintDefaults.opacity
+                                uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)

@@ -2425,6 +2425,7 @@ struct ContentView: View {
 
     @AppStorage("sidebarBlendMode") private var sidebarBlendMode = SidebarBlendModeOption.withinWindow.rawValue
     @AppStorage("sidebarMatchTerminalBackground") private var sidebarMatchTerminalBackground = false
+    @AppStorage(UIFontScaleSettings.key) private var uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
 
     // Background glass settings
     @AppStorage("bgGlassTintHex") private var bgGlassTintHex = "#000000"
@@ -2519,6 +2520,13 @@ struct ContentView: View {
             if tab.bonsplitController.configuration.appearance.tabBarLeadingInset != inset {
                 tab.bonsplitController.configuration.appearance.tabBarLeadingInset = inset
             }
+        }
+    }
+
+    private func syncFontScale() {
+        let scale = CGFloat(UIFontScaleSettings.currentScale())
+        for tab in tabManager.tabs {
+            tab.applyFontScale(scale)
         }
     }
 
@@ -3099,6 +3107,10 @@ struct ContentView: View {
 
         view = AnyView(view.onChange(of: isMinimalMode) { _, _ in
             syncTrafficLightInset()
+        })
+
+        view = AnyView(view.onChange(of: uiZoomLevel) { _ in
+            syncFontScale()
         })
 
         view = AnyView(view.onChange(of: sidebarState.persistedWidth) { newValue in
@@ -5170,6 +5182,12 @@ struct ContentView: View {
             return .toggleSplitZoom
         case "palette.triggerFlash":
             return .triggerFlash
+        case "palette.uiZoomIn":
+            return .uiZoomIn
+        case "palette.uiZoomOut":
+            return .uiZoomOut
+        case "palette.uiZoomReset":
+            return .uiZoomReset
         default:
             return nil
         }
@@ -5992,6 +6010,31 @@ struct ContentView: View {
             )
         )
 
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.uiZoomIn",
+                title: constant(String(localized: "command.uiZoomIn.title", defaultValue: "UI Zoom In")),
+                subtitle: constant(String(localized: "command.uiZoom.subtitle", defaultValue: "Appearance")),
+                keywords: ["zoom", "in", "font", "scale", "bigger", "larger", "increase"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.uiZoomOut",
+                title: constant(String(localized: "command.uiZoomOut.title", defaultValue: "UI Zoom Out")),
+                subtitle: constant(String(localized: "command.uiZoom.subtitle", defaultValue: "Appearance")),
+                keywords: ["zoom", "out", "font", "scale", "smaller", "decrease"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.uiZoomReset",
+                title: constant(String(localized: "command.uiZoomReset.title", defaultValue: "UI Zoom Reset")),
+                subtitle: constant(String(localized: "command.uiZoom.subtitle", defaultValue: "Appearance")),
+                keywords: ["zoom", "reset", "font", "scale", "default"]
+            )
+        )
+
         let cmuxConfigDefaultSubtitle = constant(String(localized: "command.cmuxConfig.subtitle", defaultValue: "cmux.json"))
         for command in cmuxConfigStore.loadedCommands {
             let commandName = sanitizeCmuxConfigPaletteText(command.name)
@@ -6350,6 +6393,16 @@ struct ContentView: View {
                 NSSound.beep()
                 return
             }
+        }
+
+        registry.register(commandId: "palette.uiZoomIn") {
+            AppDelegate.shared?.adjustUIZoom(by: UIFontScaleSettings.zoomStep)
+        }
+        registry.register(commandId: "palette.uiZoomOut") {
+            AppDelegate.shared?.adjustUIZoom(by: -UIFontScaleSettings.zoomStep)
+        }
+        registry.register(commandId: "palette.uiZoomReset") {
+            AppDelegate.shared?.resetUIZoom()
         }
 
         for command in cmuxConfigStore.loadedCommands {
@@ -11055,10 +11108,13 @@ private struct TabItemView: View, Equatable {
     private var activeTabIndicatorStyleRaw = SidebarActiveTabIndicatorSettings.defaultStyle.rawValue
     @AppStorage("sidebarSelectionColorHex") private var sidebarSelectionColorHex: String?
     @AppStorage("sidebarNotificationBadgeColorHex") private var sidebarNotificationBadgeColorHex: String?
+    @AppStorage(UIFontScaleSettings.key) private var uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
 
     var isMultiSelected: Bool {
         selectedTabIds.contains(tab.id)
     }
+
+    private var fontScale: CGFloat { CGFloat(UIFontScaleSettings.scale(for: uiZoomLevel)) }
 
     private var isBeingDragged: Bool {
         draggedTabId == tab.id
@@ -11207,7 +11263,7 @@ private struct TabItemView: View, Equatable {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(remoteWorkspaceSidebarText)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 10 * fontScale, design: .monospaced))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -11215,7 +11271,7 @@ private struct TabItemView: View, Equatable {
                     Spacer(minLength: 0)
 
                     Text(remoteConnectionStatusText)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 9 * fontScale, weight: .medium))
                         .foregroundColor(activeSecondaryColor(0.58))
                         .lineLimit(1)
                 }
@@ -11304,7 +11360,7 @@ private struct TabItemView: View, Equatable {
                         Circle()
                             .fill(activeUnreadBadgeFillColor)
                         Text("\(unreadCount)")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 9 * fontScale, weight: .semibold))
                             .foregroundColor(.white)
                     }
                     .frame(width: 16, height: 16)
@@ -11312,13 +11368,13 @@ private struct TabItemView: View, Equatable {
 
                 if tab.isPinned {
                     Image(systemName: "pin.fill")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 9 * fontScale, weight: .semibold))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .safeHelp(protectedWorkspaceTooltip)
                 }
 
                 Text(tab.title)
-                    .font(.system(size: 12.5, weight: titleFontWeight))
+                    .font(.system(size: 12.5 * fontScale, weight: titleFontWeight))
                     .foregroundColor(activePrimaryTextColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -11334,7 +11390,7 @@ private struct TabItemView: View, Equatable {
                         tabManager.closeWorkspaceWithConfirmation(tab)
                     }) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: 9 * fontScale, weight: .medium))
                             .foregroundColor(activeSecondaryColor(0.7))
                     }
                     .buttonStyle(.plain)
@@ -11347,7 +11403,7 @@ private struct TabItemView: View, Equatable {
                         Text(workspaceShortcutLabel)
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .font(.system(size: 10 * fontScale, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(activePrimaryTextColor)
                             .padding(.horizontal, 6)
@@ -11366,7 +11422,7 @@ private struct TabItemView: View, Equatable {
 
             if let subtitle = effectiveSubtitle {
                 Text(subtitle)
-                    .font(.system(size: 10))
+                    .font(.system(size: 10 * fontScale))
                     .foregroundColor(activeSecondaryColor(0.8))
                     .lineLimit(2)
                     .truncationMode(.tail)
@@ -11400,10 +11456,10 @@ private struct TabItemView: View, Equatable {
             if detailVisibility.showsLog, let latestLog = tab.logEntries.last {
                 HStack(spacing: 4) {
                     Image(systemName: logLevelIcon(latestLog.level))
-                        .font(.system(size: 8))
+                        .font(.system(size: 8 * fontScale))
                         .foregroundColor(logLevelColor(latestLog.level, isActive: usesInvertedActiveForeground))
                     Text(latestLog.message)
-                        .font(.system(size: 10))
+                        .font(.system(size: 10 * fontScale))
                         .foregroundColor(activeSecondaryColor(0.8))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -11427,7 +11483,7 @@ private struct TabItemView: View, Equatable {
 
                     if let label = progress.label {
                         Text(label)
-                            .font(.system(size: 9))
+                            .font(.system(size: 9 * fontScale))
                             .foregroundColor(activeSecondaryColor(0.6))
                             .lineLimit(1)
                     }
@@ -11442,7 +11498,7 @@ private struct TabItemView: View, Equatable {
                         HStack(alignment: .top, spacing: 3) {
                             if sidebarShowGitBranchIcon, branchLinesContainBranch {
                                 Image(systemName: "arrow.triangle.branch")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 9 * fontScale))
                                     .foregroundColor(activeSecondaryColor(0.6))
                             }
                             VStack(alignment: .leading, spacing: 1) {
@@ -11450,7 +11506,7 @@ private struct TabItemView: View, Equatable {
                                     HStack(spacing: 3) {
                                         if let branch = line.branch {
                                             Text(branch)
-                                                .font(.system(size: 10, design: .monospaced))
+                                                .font(.system(size: 10 * fontScale, design: .monospaced))
                                                 .foregroundColor(activeSecondaryColor(0.75))
                                                 .lineLimit(1)
                                                 .truncationMode(.tail)
@@ -11463,7 +11519,7 @@ private struct TabItemView: View, Equatable {
                                         }
                                         if let directory = line.directory {
                                             Text(directory)
-                                                .font(.system(size: 10, design: .monospaced))
+                                                .font(.system(size: 10 * fontScale, design: .monospaced))
                                                 .foregroundColor(activeSecondaryColor(0.75))
                                                 .lineLimit(1)
                                                 .truncationMode(.tail)
@@ -11477,11 +11533,11 @@ private struct TabItemView: View, Equatable {
                     HStack(spacing: 3) {
                         if sidebarShowGitBranchIcon, compactGitBranchSummaryText != nil {
                             Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 9))
+                                .font(.system(size: 9 * fontScale))
                                 .foregroundColor(activeSecondaryColor(0.6))
                         }
                         Text(dirRow)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(.system(size: 10 * fontScale, design: .monospaced))
                             .foregroundColor(activeSecondaryColor(0.75))
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -11509,7 +11565,7 @@ private struct TabItemView: View, Equatable {
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
                             }
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 10 * fontScale, weight: .semibold))
                             .foregroundColor(pullRequestForegroundColor)
                         }
                         .buttonStyle(.plain)
@@ -11533,7 +11589,7 @@ private struct TabItemView: View, Equatable {
                     }
                     Spacer(minLength: 0)
                 }
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 10 * fontScale, design: .monospaced))
                 .foregroundColor(activeSecondaryColor(0.75))
                 .lineLimit(1)
             }
@@ -12503,6 +12559,7 @@ private struct SidebarMetadataRows: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @AppStorage(UIFontScaleSettings.key) private var uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
     @State private var isExpanded: Bool = false
     private let collapsedEntryLimit = 3
 
@@ -12520,7 +12577,7 @@ private struct SidebarMetadataRows: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 10 * CGFloat(UIFontScaleSettings.scale(for: uiZoomLevel)), weight: .semibold))
                 .foregroundColor(isActive ? activeSecondaryTextColor : .secondary.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -12555,6 +12612,10 @@ private struct SidebarMetadataEntryRow: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @AppStorage(UIFontScaleSettings.key) private var uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
+
+    private var fontScale: CGFloat { CGFloat(UIFontScaleSettings.scale(for: uiZoomLevel)) }
+
     var body: some View {
         Group {
             if let url = entry.url {
@@ -12586,7 +12647,7 @@ private struct SidebarMetadataEntryRow: View {
                 .truncationMode(.tail)
             Spacer(minLength: 0)
         }
-        .font(.system(size: 10))
+        .font(.system(size: 10 * fontScale))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -12610,12 +12671,12 @@ private struct SidebarMetadataEntryRow: View {
         if iconRaw.hasPrefix("emoji:") {
             let value = String(iconRaw.dropFirst("emoji:".count))
             guard !value.isEmpty else { return nil }
-            return AnyView(Text(value).font(.system(size: 9)))
+            return AnyView(Text(value).font(.system(size: 9 * fontScale)))
         }
         if iconRaw.hasPrefix("text:") {
             let value = String(iconRaw.dropFirst("text:".count))
             guard !value.isEmpty else { return nil }
-            return AnyView(Text(value).font(.system(size: 8, weight: .semibold)))
+            return AnyView(Text(value).font(.system(size: 8 * fontScale, weight: .semibold)))
         }
         let symbolName: String
         if iconRaw.hasPrefix("sf:") {
@@ -12624,7 +12685,7 @@ private struct SidebarMetadataEntryRow: View {
             symbolName = iconRaw
         }
         guard !symbolName.isEmpty else { return nil }
-        return AnyView(Image(systemName: symbolName).font(.system(size: 8, weight: .medium)))
+        return AnyView(Image(systemName: symbolName).font(.system(size: 8 * fontScale, weight: .medium)))
     }
 
     @ViewBuilder
@@ -12652,6 +12713,7 @@ private struct SidebarMetadataMarkdownBlocks: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @AppStorage(UIFontScaleSettings.key) private var uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
     @State private var isExpanded: Bool = false
     private let collapsedBlockLimit = 1
 
@@ -12673,7 +12735,7 @@ private struct SidebarMetadataMarkdownBlocks: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 10 * CGFloat(UIFontScaleSettings.scale(for: uiZoomLevel)), weight: .semibold))
                 .foregroundColor(isActive ? .white.opacity(0.65) : .secondary.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -12695,6 +12757,7 @@ private struct SidebarMetadataMarkdownBlockRow: View {
     let isActive: Bool
     let onFocus: () -> Void
 
+    @AppStorage(UIFontScaleSettings.key) private var uiZoomLevel = UIFontScaleSettings.defaultZoomLevel
     @State private var renderedMarkdown: AttributedString?
 
     var body: some View {
@@ -12707,7 +12770,7 @@ private struct SidebarMetadataMarkdownBlockRow: View {
                     .foregroundColor(foregroundColor)
             }
         }
-        .font(.system(size: 10))
+        .font(.system(size: 10 * CGFloat(UIFontScaleSettings.scale(for: uiZoomLevel))))
         .multilineTextAlignment(.leading)
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(Rectangle())

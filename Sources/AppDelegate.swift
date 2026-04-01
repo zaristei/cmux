@@ -9840,6 +9840,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        // UI Zoom
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .uiZoomIn)) {
+#if DEBUG
+            dlog("shortcut.action name=uiZoomIn \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            adjustUIZoomLevel(by: UIFontScaleSettings.zoomStep)
+            return true
+        }
+
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .uiZoomOut)) {
+#if DEBUG
+            dlog("shortcut.action name=uiZoomOut \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            adjustUIZoomLevel(by: -UIFontScaleSettings.zoomStep)
+            return true
+        }
+
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .uiZoomReset)) {
+#if DEBUG
+            dlog("shortcut.action name=uiZoomReset \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            resetUIZoomLevel()
+            return true
+        }
+
         // Surface navigation (legacy Ctrl+Tab support)
         if matchTabShortcut(event: event, shortcut: StoredShortcut(key: "\t", command: false, shift: false, option: false, control: true)) {
             tabManager?.selectNextSurface()
@@ -10471,6 +10496,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             "moveWeb=\(movedToWebView ? 1 : 0) moveNil=\(movedToNil ? 1 : 0) \(browser.debugDeveloperToolsStateSummary())"
         )
         #endif
+    }
+
+    func adjustUIZoom(by delta: Double) {
+        adjustUIZoomLevel(by: delta)
+    }
+
+    func resetUIZoom() {
+        resetUIZoomLevel()
+    }
+
+    private func adjustUIZoomLevel(by delta: Double) {
+        let current = UserDefaults.standard.double(forKey: UIFontScaleSettings.key)
+        let newValue = current + delta
+        UserDefaults.standard.set(newValue, forKey: UIFontScaleSettings.key)
+        let fontAction = delta > 0 ? "increase_font_size:1" : "decrease_font_size:1"
+        performTerminalFontActionOnAllSurfaces(fontAction)
+        notifyUIZoomChanged()
+    }
+
+    private func resetUIZoomLevel() {
+        UserDefaults.standard.set(UIFontScaleSettings.defaultZoomLevel, forKey: UIFontScaleSettings.key)
+        performTerminalFontActionOnAllSurfaces("reset_font_size")
+        notifyUIZoomChanged()
+    }
+
+    private func notifyUIZoomChanged() {
+        // Force syncFontScale on all windows to update Bonsplit tab bar appearance.
+        for context in mainWindowContexts.values {
+            let scale = CGFloat(UIFontScaleSettings.currentScale())
+            for tab in context.tabManager.tabs {
+                tab.applyFontScale(scale)
+            }
+        }
+    }
+
+    private func performTerminalFontActionOnAllSurfaces(_ action: String) {
+        for context in mainWindowContexts.values {
+            for tab in context.tabManager.tabs {
+                tab.performTerminalBindingActionOnAllSurfaces(action)
+            }
+        }
     }
 
     @discardableResult
