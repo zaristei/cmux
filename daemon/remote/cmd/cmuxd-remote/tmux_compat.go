@@ -1088,12 +1088,19 @@ func tmuxSplitWindow(rc *rpcContext, args []string) error {
 	}
 
 	focusNewPane := !p.hasFlag("-d")
-	created, err := rc.call("surface.split", map[string]any{
+	splitParams := map[string]any{
 		"workspace_id": targetWs,
 		"surface_id":   targetSurface,
 		"direction":    direction,
 		"focus":        focusNewPane,
-	})
+	}
+	// If running inside a container, pass the re-entry command so the new
+	// pane automatically enters the same container.
+	containerCommand := os.Getenv("CMUX_CONTAINER_COMMAND")
+	if containerCommand != "" {
+		splitParams["command"] = containerCommand
+	}
+	created, err := rc.call("surface.split", splitParams)
 	if err != nil {
 		return err
 	}
@@ -1123,6 +1130,15 @@ func tmuxSplitWindow(rc *rpcContext, args []string) error {
 		"workspace_id": targetWs,
 		"orientation":  "vertical",
 	})
+
+	// Propagate container command to the new surface so further splits also re-enter.
+	if containerCommand != "" {
+		rc.call("surface.set_container_command", map[string]any{
+			"workspace_id": targetWs,
+			"surface_id":   surfaceId,
+			"command":      containerCommand,
+		})
+	}
 
 	if text := tmuxShellCommandText(p.positional, p.value("-c")); text != "" {
 		rc.call("surface.send_text", map[string]any{

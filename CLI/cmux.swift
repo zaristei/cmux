@@ -2384,6 +2384,10 @@ struct CMUXCLI {
         case "markdown":
             try runMarkdownCommand(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
 
+        // Container integration
+        case "container":
+            try runContainerCommand(commandArgs: commandArgs, client: client, socketPath: socketPath)
+
         default:
             print(usage())
             throw CLIError(message: "Unknown command: \(command)")
@@ -12933,6 +12937,8 @@ struct CMUXCLI {
           browser addscript <script>
           browser addstyle <css>
           browser identify [--surface <id|ref|index>]
+          container relay [--port <N>]
+          container run <docker|sbx|podman> <image> [-- cmd]
           help
 
         Environment:
@@ -12943,6 +12949,360 @@ struct CMUXCLI {
           CMUX_SOCKET_PATH    Override the Unix socket path. Without this, the CLI defaults
                               to ~/Library/Application Support/cmux/cmux.sock and auto-discovers tagged/debug sockets.
         """
+    }
+
+    // MARK: - Container integration
+
+    private func runContainerCommand(commandArgs: [String], client: SocketClient, socketPath: String) throws {
+        guard let subcommand = commandArgs.first else {
+            throw CLIError(message: containerUsage())
+        }
+        let subArgs = Array(commandArgs.dropFirst())
+        switch subcommand {
+        case "relay":
+            try runContainerRelay(commandArgs: subArgs, socketPath: socketPath)
+        case "run":
+            try runContainerRun(commandArgs: subArgs, client: client, socketPath: socketPath)
+        case "help":
+            print(containerUsage())
+        default:
+            throw CLIError(message: "container: unknown subcommand '\(subcommand)'\n\(containerUsage())")
+        }
+    }
+
+    private func containerUsage() -> String {
+        """
+        Usage: cmux container <subcommand> [options]
+
+        Subcommands:
+          relay [--port <N>]                Start a TCP relay to the cmux socket
+          run <runtime> <image> [-- cmd]    Launch a container with cmux access
+          help                              Show this help
+
+        The relay bridges TCP connections to the local cmux Unix socket, enabling
+        processes inside containers to control panes and browser panels.
+
+        Examples:
+          cmux container relay --port 9876
+          cmux container run docker ubuntu -- bash
+          cmux container run sbx -- claude
+        """
+    }
+
+    /// TCP-to-Unix-socket relay for container access.
+    private func runContainerRelay(commandArgs: [String], socketPath: String) throws {
+        let (portStr, remaining) = parseOption(commandArgs, name: "--port")
+        let requestedPort = portStr.flatMap { UInt16($0) } ?? 0
+        if let unknown = remaining.first(where: { $0.hasPrefix("--") }) {
+            throw CLIError(message: "container relay: unknown flag '\(unknown)'")
+        }
+
+        // Resolve password for authentication.
+        let password = SocketPasswordResolver.resolve(explicit: nil, socketPath: socketPath)
+
+        // Create TCP listener.
+        let serverFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard serverFD >= 0 else {
+            throw CLIError(message: "container relay: failed to create TCP socket")
+        }
+        var reuse: Int32 = 1
+        setsockopt(serverFD, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = requestedPort.bigEndian
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.bind(serverFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            Darwin.close(serverFD)
+            throw CLIError(message: "container relay: failed to bind to port \(requestedPort) (\(String(cString: strerror(errno))))")
+        }
+
+        guard listen(serverFD, 16) == 0 else {
+            Darwin.close(serverFD)
+            throw CLIError(message: "container relay: failed to listen (\(String(cString: strerror(errno))))")
+        }
+
+        // Read back the actual port.
+        var boundAddr = sockaddr_in()
+        var boundAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        withUnsafeMutablePointer(to: &boundAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                getsockname(serverFD, sockaddrPtr, &boundAddrLen)
+            }
+        }
+        let actualPort = UInt16(bigEndian: boundAddr.sin_port)
+
+        print("CMUX_RELAY_PORT=\(actualPort)")
+        print("Relay listening on 127.0.0.1:\(actualPort) → \(socketPath)")
+        if password != nil {
+            print("Password authentication enabled")
+        } else {
+            print("WARNING: No password configured. Set socket control mode to 'password' for security.")
+        }
+        print("Press Ctrl+C to stop.")
+        fflush(stdout)
+
+        // Handle SIGINT for clean shutdown.
+        signal(SIGINT) { _ in
+            print("\nRelay stopped.")
+            exit(0)
+        }
+
+        // Accept loop.
+        while true {
+            var clientAddr = sockaddr_in()
+            var clientAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                    accept(serverFD, sockaddrPtr, &clientAddrLen)
+                }
+            }
+            guard clientFD >= 0 else { continue }
+
+            // Handle each client in a background thread.
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.handleRelayClient(clientFD: clientFD, socketPath: socketPath, password: password)
+            }
+        }
+    }
+
+    private func handleRelayClient(clientFD: Int32, socketPath: String, password: String?) {
+        defer { Darwin.close(clientFD) }
+
+        // If password is set, require authentication as first line.
+        if let password {
+            var authBuffer = [UInt8](repeating: 0, count: 4096)
+            var authLen = 0
+            // Read until newline or buffer full.
+            while authLen < authBuffer.count {
+                let n = read(clientFD, &authBuffer[authLen], 1)
+                if n <= 0 { return }
+                if authBuffer[authLen] == UInt8(ascii: "\n") { break }
+                authLen += 1
+            }
+            let authLine = String(bytes: authBuffer[0..<authLen], encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // Expect "auth <password>"
+            let parts = authLine.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2,
+                  parts[0] == "auth",
+                  String(parts[1]) == password else {
+                let errMsg = "ERR: Authentication failed\n"
+                _ = errMsg.withCString { write(clientFD, $0, errMsg.utf8.count) }
+                return
+            }
+            let okMsg = "OK\n"
+            _ = okMsg.withCString { write(clientFD, $0, okMsg.utf8.count) }
+        }
+
+        // Connect to the local Unix socket.
+        let unixFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard unixFD >= 0 else { return }
+
+        var unixAddr = sockaddr_un()
+        unixAddr.sun_family = sa_family_t(AF_UNIX)
+        let maxPathLength = MemoryLayout.size(ofValue: unixAddr.sun_path)
+        socketPath.withCString { ptr in
+            withUnsafeMutablePointer(to: &unixAddr.sun_path) { pathPtr in
+                let buf = UnsafeMutableRawPointer(pathPtr).assumingMemoryBound(to: CChar.self)
+                strncpy(buf, ptr, maxPathLength - 1)
+            }
+        }
+        let connectResult = withUnsafePointer(to: &unixAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(unixFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connectResult == 0 else {
+            Darwin.close(unixFD)
+            return
+        }
+
+        // Bidirectional pipe: two threads, one per direction.
+        // When either direction hits EOF/error, we shut down both FDs.
+        let closeLock = NSLock()
+        var closed = false
+        func shutdownBoth() {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            guard !closed else { return }
+            closed = true
+            shutdown(clientFD, SHUT_RDWR)
+            shutdown(unixFD, SHUT_RDWR)
+        }
+
+        let group = DispatchGroup()
+
+        // Client → Unix socket
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { group.leave(); shutdownBoth() }
+            let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 16384)
+            defer { buf.deallocate() }
+            while true {
+                let n = read(clientFD, buf, 16384)
+                if n <= 0 { break }
+                var off = 0
+                while off < n {
+                    let w = write(unixFD, buf.advanced(by: off), n - off)
+                    if w <= 0 { return }
+                    off += w
+                }
+            }
+        }
+
+        // Unix socket → Client
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { group.leave(); shutdownBoth() }
+            let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 16384)
+            defer { buf.deallocate() }
+            while true {
+                let n = read(unixFD, buf, 16384)
+                if n <= 0 { break }
+                var off = 0
+                while off < n {
+                    let w = write(clientFD, buf.advanced(by: off), n - off)
+                    if w <= 0 { return }
+                    off += w
+                }
+            }
+        }
+
+        group.wait()
+        Darwin.close(unixFD)
+    }
+
+    /// Launch a container with cmux socket access pre-configured.
+    private func runContainerRun(commandArgs: [String], client: SocketClient, socketPath: String) throws {
+        let (hostOverride, rem0) = parseOption(commandArgs, name: "--host")
+        let (portStr, rem1) = parseOption(rem0, name: "--relay-port")
+
+        guard let runtime = rem1.first else {
+            throw CLIError(message: "container run: missing runtime (docker, sbx, podman)")
+        }
+        let runtimeArgs = Array(rem1.dropFirst())
+
+        // Determine the host gateway for the container to reach back to the host.
+        let hostGateway: String
+        if let hostOverride {
+            hostGateway = hostOverride
+        } else {
+            switch runtime {
+            case "podman":
+                hostGateway = "host.containers.internal"
+            default: // docker, sbx
+                hostGateway = "host.docker.internal"
+            }
+        }
+
+        // Start relay in background if requested port or auto.
+        let relayPort: UInt16
+        if let portStr, let port = UInt16(portStr) {
+            relayPort = port
+        } else {
+            // Start an ephemeral relay.
+            let pipe = Pipe()
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            process.arguments = ["container", "relay", "--port", "0"]
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+
+            // Read the port from the relay's output.
+            let data = pipe.fileHandleForReading.readData(ofLength: 256)
+            let output = String(data: data, encoding: .utf8) ?? ""
+            guard let portLine = output.components(separatedBy: "\n").first(where: { $0.hasPrefix("CMUX_RELAY_PORT=") }),
+                  let port = UInt16(portLine.replacingOccurrences(of: "CMUX_RELAY_PORT=", with: "")) else {
+                throw CLIError(message: "container run: failed to start relay")
+            }
+            relayPort = port
+        }
+
+        let socketAddr = "\(hostGateway):\(relayPort)"
+        let password = SocketPasswordResolver.resolve(explicit: nil, socketPath: socketPath) ?? ""
+        let env = ProcessInfo.processInfo.environment
+        let workspaceId = env["CMUX_WORKSPACE_ID"] ?? ""
+        let surfaceId = env["CMUX_SURFACE_ID"] ?? ""
+
+        // Build the container re-entry command for split inheritance.
+        var reentryCommand: String
+        switch runtime {
+        case "sbx":
+            // For sbx, the sandbox name is auto-generated; we'll use "sbx exec" pattern
+            reentryCommand = "sbx exec \(runtimeArgs.first ?? "default") -- bash"
+        case "docker":
+            reentryCommand = "docker exec -it \(runtimeArgs.first ?? "") bash"
+        case "podman":
+            reentryCommand = "podman exec -it \(runtimeArgs.first ?? "") bash"
+        default:
+            reentryCommand = "\(runtime) exec -it \(runtimeArgs.first ?? "") bash"
+        }
+
+        // Build the environment flags.
+        var envFlags: [String] = []
+        let envVars = [
+            ("CMUX_SOCKET_PATH", socketAddr),
+            ("CMUX_SOCKET", socketAddr),
+            ("CMUX_SOCKET_PASSWORD", password),
+            ("CMUX_WORKSPACE_ID", workspaceId),
+            ("CMUX_SURFACE_ID", surfaceId),
+            ("CMUX_CONTAINER_COMMAND", reentryCommand),
+        ]
+        for (key, value) in envVars where !value.isEmpty {
+            envFlags += ["-e", "\(key)=\(value)"]
+        }
+
+        // Find the separator.
+        let separatorIdx = runtimeArgs.firstIndex(of: "--")
+
+        // Build the final command.
+        var cmd: [String]
+        switch runtime {
+        case "sbx":
+            cmd = ["sbx", "run"]
+            if let idx = separatorIdx {
+                cmd += Array(runtimeArgs[..<idx])
+                // sbx doesn't use -e flags; env vars are passed differently
+                // For sbx, we set them in the -- args via env command
+                cmd += ["--"]
+                let innerArgs = Array(runtimeArgs[(idx + 1)...])
+                let envPrefix = envVars.filter { !$0.1.isEmpty }.map { "\($0.0)=\($0.1)" }.joined(separator: " ")
+                if innerArgs.isEmpty {
+                    cmd += ["env", envPrefix, "bash"]
+                } else {
+                    cmd += ["env"] + envVars.filter { !$0.1.isEmpty }.map { "\($0.0)=\($0.1)" } + innerArgs
+                }
+            } else {
+                cmd += runtimeArgs
+                cmd += ["--"]
+                cmd += ["env"] + envVars.filter { !$0.1.isEmpty }.map { "\($0.0)=\($0.1)" } + ["bash"]
+            }
+        default: // docker, podman
+            cmd = [runtime, "run", "--rm", "-it"] + envFlags
+            if let idx = separatorIdx {
+                cmd += Array(runtimeArgs[..<idx]) + Array(runtimeArgs[(idx + 1)...])
+            } else {
+                cmd += runtimeArgs
+            }
+        }
+
+        print("Starting container with cmux access at \(socketAddr)")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = cmd
+        process.standardInput = FileHandle.standardInput
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        try process.run()
+        process.waitUntilExit()
+        exit(process.terminationStatus)
     }
 
 #if DEBUG

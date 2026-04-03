@@ -5525,6 +5525,9 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var panelDirectories: [UUID: String] = [:]
     @Published var panelTitles: [UUID: String] = [:]
     @Published private(set) var panelCustomTitles: [UUID: String] = [:]
+    /// Container re-entry command for each panel (e.g. "docker exec -it mycontainer /bin/bash").
+    /// When a surface with a container command is split, the command is inherited by the new panel.
+    var panelContainerCommands: [UUID: String] = [:]
     @Published private(set) var pinnedPanelIds: Set<UUID> = []
     @Published private(set) var manualUnreadPanelIds: Set<UUID> = []
     @Published private(set) var tmuxLayoutSnapshot: LayoutSnapshot?
@@ -7527,6 +7530,13 @@ final class Workspace: Identifiable, ObservableObject {
         if remoteTerminalStartupCommand != nil {
             trackRemoteTerminalSurface(newPanel.id)
         }
+        // Inherit container re-entry command from source panel (e.g. "docker exec -it mycontainer bash").
+        // When a container-aware surface is split, the new surface automatically re-enters the container.
+        if let containerCommand = panelContainerCommands[panelId], remoteTerminalStartupCommand == nil {
+            panelContainerCommands[newPanel.id] = containerCommand
+            newPanel.sendText(containerCommand + "\n")
+            newPanel.surface.requestBackgroundSurfaceStartIfNeeded()
+        }
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
 
         // Pre-generate the bonsplit tab ID so we can install the panel mapping before bonsplit
@@ -7551,6 +7561,7 @@ final class Workspace: Identifiable, ObservableObject {
         guard bonsplitController.splitPane(paneId, orientation: orientation, withTab: newTab, insertFirst: insertFirst) != nil else {
             panels.removeValue(forKey: newPanel.id)
             panelTitles.removeValue(forKey: newPanel.id)
+            panelContainerCommands.removeValue(forKey: newPanel.id)
             surfaceIdToPanelId.removeValue(forKey: newTab.id)
             if remoteTerminalStartupCommand != nil {
                 untrackRemoteTerminalSurface(newPanel.id)
@@ -10392,6 +10403,7 @@ extension Workspace: BonsplitDelegate {
         panelPullRequests.removeValue(forKey: panelId)
         panelTitles.removeValue(forKey: panelId)
         panelCustomTitles.removeValue(forKey: panelId)
+        panelContainerCommands.removeValue(forKey: panelId)
         pinnedPanelIds.remove(panelId)
         manualUnreadPanelIds.remove(panelId)
         manualUnreadMarkedAt.removeValue(forKey: panelId)
@@ -10545,6 +10557,7 @@ extension Workspace: BonsplitDelegate {
                 panelPullRequests.removeValue(forKey: panelId)
                 panelTitles.removeValue(forKey: panelId)
                 panelCustomTitles.removeValue(forKey: panelId)
+                panelContainerCommands.removeValue(forKey: panelId)
                 pinnedPanelIds.remove(panelId)
                 manualUnreadPanelIds.remove(panelId)
                 panelSubscriptions.removeValue(forKey: panelId)

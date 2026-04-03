@@ -2132,6 +2132,10 @@ class TerminalController {
             return v2Result(id: id, self.v2SurfaceClearHistory(params: params))
         case "surface.trigger_flash":
             return v2Result(id: id, self.v2SurfaceTriggerFlash(params: params))
+        case "surface.set_container_command":
+            return v2Result(id: id, self.v2SurfaceSetContainerCommand(params: params))
+        case "surface.get_container_command":
+            return v2Result(id: id, self.v2SurfaceGetContainerCommand(params: params))
 
         // Panes
         case "pane.list":
@@ -2473,6 +2477,8 @@ class TerminalController {
             "surface.read_text",
             "surface.clear_history",
             "surface.trigger_flash",
+            "surface.set_container_command",
+            "surface.get_container_command",
             "pane.list",
             "pane.focus",
             "pane.surfaces",
@@ -4647,6 +4653,14 @@ class TerminalController {
                     "surface_ref": v2Ref(kind: .surface, uuid: newId),
                     "type": v2OrNull(ws.panels[newId]?.panelType.rawValue)
                 ])
+                // Send an optional startup command to the new surface (e.g. container re-entry).
+                // Uses the pending-text queue so the text is delivered even if the surface
+                // has not attached its Ghostty view yet.
+                if let command = v2String(params, "command"),
+                   let terminalPanel = ws.terminalPanel(for: newId) {
+                    terminalPanel.sendText(command + "\n")
+                    terminalPanel.surface.requestBackgroundSurfaceStartIfNeeded()
+                }
             } else {
                 result = .err(code: "internal_error", message: "Failed to create split", data: nil)
             }
@@ -5388,6 +5402,73 @@ class TerminalController {
             )
 #endif
             result = .ok(["workspace_id": ws.id.uuidString, "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id), "surface_id": surfaceId.uuidString, "surface_ref": v2Ref(kind: .surface, uuid: surfaceId), "window_id": v2OrNull(v2ResolveWindowId(tabManager: tabManager)?.uuidString), "window_ref": v2Ref(kind: .window, uuid: v2ResolveWindowId(tabManager: tabManager))])
+        }
+        return result
+    }
+
+    private func v2SurfaceSetContainerCommand(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+        let command = v2String(params, "command")
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to set container command", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+            let surfaceId: UUID? = v2UUID(params, "surface_id") ?? ws.focusedPanelId
+            guard let surfaceId else {
+                result = .err(code: "not_found", message: "No focused surface", data: nil)
+                return
+            }
+            guard ws.panels[surfaceId] != nil else {
+                result = .err(code: "not_found", message: "Surface not found", data: ["surface_id": surfaceId.uuidString])
+                return
+            }
+            if let command, !command.isEmpty {
+                ws.panelContainerCommands[surfaceId] = command
+            } else {
+                ws.panelContainerCommands.removeValue(forKey: surfaceId)
+            }
+            result = .ok([
+                "workspace_id": ws.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id),
+                "surface_id": surfaceId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: surfaceId)
+            ])
+        }
+        return result
+    }
+
+    private func v2SurfaceGetContainerCommand(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to get container command", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+            let surfaceId: UUID? = v2UUID(params, "surface_id") ?? ws.focusedPanelId
+            guard let surfaceId else {
+                result = .err(code: "not_found", message: "No focused surface", data: nil)
+                return
+            }
+            guard ws.panels[surfaceId] != nil else {
+                result = .err(code: "not_found", message: "Surface not found", data: ["surface_id": surfaceId.uuidString])
+                return
+            }
+            result = .ok([
+                "workspace_id": ws.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id),
+                "surface_id": surfaceId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: surfaceId),
+                "command": v2OrNull(ws.panelContainerCommands[surfaceId])
+            ])
         }
         return result
     }
