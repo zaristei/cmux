@@ -5690,7 +5690,8 @@ final class Workspace: Identifiable, ObservableObject {
         from backgroundColor: NSColor,
         backgroundOpacity: Double
     ) -> BonsplitConfiguration.Appearance {
-        BonsplitConfiguration.Appearance(
+        let resolvedFontScale = CGFloat(UIFontScaleSettings.currentScale())
+        return BonsplitConfiguration.Appearance(
             splitButtonTooltips: Self.currentSplitButtonTooltips(),
             enableAnimations: false,
             chromeColors: .init(
@@ -5698,8 +5699,21 @@ final class Workspace: Identifiable, ObservableObject {
                     backgroundColor: backgroundColor,
                     backgroundOpacity: backgroundOpacity
                 )
-            )
+            ),
+            fontScale: resolvedFontScale
         )
+    }
+
+    func applyFontScale(_ scale: CGFloat) {
+        guard bonsplitController.configuration.appearance.fontScale != scale else { return }
+        bonsplitController.configuration.appearance.fontScale = scale
+    }
+
+    func performTerminalBindingActionOnAllSurfaces(_ action: String) {
+        for panel in panels.values {
+            guard let terminal = panel as? TerminalPanel else { continue }
+            _ = terminal.performBindingAction(action)
+        }
     }
 
     func applyGhosttyChrome(from config: GhosttyConfig, reason: String = "unspecified") {

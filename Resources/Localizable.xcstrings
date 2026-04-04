@@ -84235,19 +84235,53 @@
         }
       }
     },
+    "settings.sidebarAppearance.uiZoomLevel": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "UI Zoom Level"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "UIズームレベル"
+          }
+        }
+      }
+    },
+    "settings.sidebarAppearance.uiZoomLevel.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scale sidebar and tab bar text. Use ⌘= / ⌘- to adjust. Does not affect terminal font size."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイドバーとタブバーのテキストを拡大縮小します。⌘= / ⌘- で調整できます。ターミナルのフォントサイズには影響しません。"
+          }
+        }
+      }
+    },
     "settings.sidebarAppearance.reset": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Reset Sidebar Tint"
+            "value": "Reset Sidebar Appearance"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "サイドバーのティントをリセット"
+            "value": "サイドバーの外観をリセット"
           }
         },
         "zh-Hans": {
