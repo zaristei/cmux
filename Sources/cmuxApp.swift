@@ -3867,6 +3867,8 @@ struct SettingsView: View {
     private var sendAnonymousTelemetry = TelemetrySettings.defaultSendAnonymousTelemetry
     @AppStorage("cmuxPortBase") private var cmuxPortBase = 9100
     @AppStorage("cmuxPortRange") private var cmuxPortRange = 10
+    @AppStorage("tcpRelayEnabled") private var tcpRelayEnabled = false
+    @AppStorage("tcpRelayPort") private var tcpRelayPort = 9999
     @AppStorage(BrowserSearchSettings.searchEngineKey) private var browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
     @AppStorage(BrowserSearchSettings.searchSuggestionsEnabledKey) private var browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
     @AppStorage(BrowserThemeSettings.modeKey) private var browserThemeMode = BrowserThemeSettings.defaultMode.rawValue
@@ -5276,6 +5278,53 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardNote(String(localized: "settings.automation.port.note", defaultValue: "Each workspace gets CMUX_PORT and CMUX_PORT_END env vars with a dedicated port range. New terminals inherit these values."))
+                    }
+
+                    SettingsCard {
+                        SettingsCardRow(
+                            String(localized: "settings.automation.tcpRelay", defaultValue: "TCP Relay for Containers"),
+                            subtitle: tcpRelayEnabled
+                                ? String(localized: "settings.automation.tcpRelay.subtitleOn", defaultValue: "Containers and remote clients can control cmux via TCP.")
+                                : String(localized: "settings.automation.tcpRelay.subtitleOff", defaultValue: "TCP relay is disabled. Only local Unix socket connections are accepted.")
+                        ) {
+                            Toggle("", isOn: $tcpRelayEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                                .accessibilityIdentifier("SettingsTCPRelayToggle")
+                        }
+
+                        if tcpRelayEnabled {
+                            SettingsCardDivider()
+
+                            SettingsCardRow(String(localized: "settings.automation.tcpRelay.port", defaultValue: "Relay Port"), subtitle: String(localized: "settings.automation.tcpRelay.port.subtitle", defaultValue: "Fixed TCP port for container connections."), controlWidth: pickerColumnWidth) {
+                                TextField("", value: $tcpRelayPort, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .multilineTextAlignment(.trailing)
+                            }
+
+                            SettingsCardDivider()
+
+                            SettingsCardRow(
+                                String(localized: "settings.automation.tcpRelay.envVars", defaultValue: "Container Environment"),
+                                subtitle: String(localized: "settings.automation.tcpRelay.envVars.subtitle", defaultValue: "Copy these env vars into your container to enable cmux CLI access.")
+                            ) {
+                                Button(String(localized: "settings.automation.tcpRelay.copy", defaultValue: "Copy")) {
+                                    let credentials = RelayCredentialStore.loadOrCreate()
+                                    let snippet = """
+                                    export CMUX_SOCKET_PATH=host.docker.internal:\(tcpRelayPort)
+                                    export CMUX_RELAY_ID=\(credentials.relayID)
+                                    export CMUX_RELAY_TOKEN=\(credentials.relayToken)
+                                    """
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(snippet, forType: .string)
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardNote(String(localized: "settings.automation.tcpRelay.note", defaultValue: "Enables a TCP relay server alongside the Unix socket. Requires HMAC authentication. Restart cmux after changing these settings. Binds to 127.0.0.1 by default (reachable from Docker via host.docker.internal)."))
                     }
 
                     SettingsSectionHeader(title: String(localized: "settings.section.customCommands", defaultValue: "Custom Commands"))

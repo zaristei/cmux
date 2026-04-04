@@ -767,12 +767,20 @@ private enum CLISocketPathResolver {
         return dedupe(discovered.prefix(limit).map(\.path))
     }
 
+    private static func isTCPAddress(_ path: String) -> Bool {
+        !path.hasPrefix("/") && path.contains(":")
+    }
+
     private static func isSocketFile(_ path: String) -> Bool {
+        if isTCPAddress(path) { return false }
         var st = stat()
         return lstat(path, &st) == 0 && (st.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK)
     }
 
     private static func canConnect(to path: String) -> Bool {
+        if isTCPAddress(path) {
+            return canConnectTCP(path)
+        }
         guard isSocketFile(path) else { return false }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
@@ -791,6 +799,29 @@ private enum CLISocketPathResolver {
         let result = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
                 Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        return result == 0
+    }
+
+    private static func canConnectTCP(_ address: String) -> Bool {
+        guard let colonIndex = address.lastIndex(of: ":") else { return false }
+        let host = String(address[address.startIndex..<colonIndex])
+        let portString = String(address[address.index(after: colonIndex)...])
+        guard let port = UInt16(portString), port > 0 else { return false }
+
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        guard host.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else { return false }
+
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         return result == 0
@@ -840,8 +871,17 @@ private enum CLISocketPathResolver {
 }
 
 final class SocketClient {
+    private enum ConnectionMode {
+        case unix(path: String)
+        case tcp(host: String, port: UInt16)
+    }
+
     private let path: String
+    private let mode: ConnectionMode
     private var socketFD: Int32 = -1
+    private var httpRelayURL: URL?
+    private var httpRelayID: String?
+    private var httpRelayToken: String?
     private static let defaultResponseTimeoutSeconds: TimeInterval = 15.0
     private static let multilineResponseIdleTimeoutSeconds: TimeInterval = 0.12
     private static let responseTimeoutSeconds: TimeInterval = {
@@ -856,15 +896,50 @@ final class SocketClient {
 
     init(path: String) {
         self.path = path
+        self.mode = Self.parseConnectionMode(path)
     }
 
     var socketPath: String {
         path
     }
 
+    var isTCP: Bool {
+        if case .tcp = mode { return true }
+        return false
+    }
+
+    private static func parseConnectionMode(_ address: String) -> ConnectionMode {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.hasPrefix("/"), let colonIndex = trimmed.lastIndex(of: ":") {
+            let host = String(trimmed[trimmed.startIndex..<colonIndex])
+            let portString = String(trimmed[trimmed.index(after: colonIndex)...])
+            if let port = UInt16(portString), port > 0, !host.isEmpty {
+                return .tcp(host: host, port: port)
+            }
+        }
+        return .unix(path: trimmed)
+    }
+
     func connect() throws {
+        if httpRelayURL != nil { return }
         if socketFD >= 0 { return }
+        if case .tcp = mode {
+            // For TCP mode, skip raw connect — authenticateClientIfNeeded
+            // will configure HTTP relay and send() will use it.
+            return
+        }
         try connectOnce()
+    }
+
+    func configureHTTPRelay(relayID: String, relayToken: String) {
+        guard case .tcp(let host, let port) = mode else { return }
+        self.httpRelayURL = URL(string: "http://\(host):\(port)/relay")
+        self.httpRelayID = relayID
+        self.httpRelayToken = relayToken
+    }
+
+    var isHTTPRelay: Bool {
+        httpRelayURL != nil
     }
 
     func close() {
@@ -875,6 +950,9 @@ final class SocketClient {
     }
 
     func send(command: String) throws -> String {
+        if let url = httpRelayURL, let relayID = httpRelayID, let relayToken = httpRelayToken {
+            return try sendViaHTTP(command: command, url: url, relayID: relayID, relayToken: relayToken)
+        }
         guard socketFD >= 0 else { throw CLIError(message: "Not connected") }
         let payload = command + "\n"
         try payload.withCString { ptr in
@@ -925,6 +1003,15 @@ final class SocketClient {
     }
 
     private func connectOnce() throws {
+        switch mode {
+        case .unix(let path):
+            try connectUnix(path: path)
+        case .tcp(let host, let port):
+            try connectTCP(host: host, port: port)
+        }
+    }
+
+    private func connectUnix(path: String) throws {
         // Verify socket is owned by the current user to prevent fake-socket attacks.
         var st = stat()
         guard stat(path, &st) == 0 else {
@@ -967,6 +1054,211 @@ final class SocketClient {
         throw CLIError(
             message: "Failed to connect to socket at \(path) (\(String(cString: strerror(connectErrno))), errno \(connectErrno))"
         )
+    }
+
+    private func connectTCP(host: String, port: UInt16) throws {
+        socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        if socketFD < 0 {
+            throw CLIError(message: "Failed to create TCP socket")
+        }
+
+        var flag: Int32 = 1
+        setsockopt(socketFD, IPPROTO_TCP, TCP_NODELAY, &flag, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+
+        guard host.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else {
+            Darwin.close(socketFD)
+            socketFD = -1
+            throw CLIError(message: "Invalid TCP host address: \(host)")
+        }
+
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(socketFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if result == 0 {
+            return
+        }
+
+        let connectErrno = errno
+        Darwin.close(socketFD)
+        socketFD = -1
+        throw CLIError(
+            message: "Failed to connect to TCP relay at \(host):\(port) (\(String(cString: strerror(connectErrno))), errno \(connectErrno))"
+        )
+    }
+
+    func performRelayAuth(relayID: String, relayToken: String) throws {
+        guard socketFD >= 0 else { throw CLIError(message: "Not connected") }
+
+        // Read challenge line from server
+        var challengeData = Data()
+        var scratch = [UInt8](repeating: 0, count: 4096)
+        try configureReceiveTimeout(5.0)
+        while true {
+            let count = Darwin.read(socketFD, &scratch, scratch.count)
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw CLIError(message: "Failed to read relay auth challenge")
+            }
+            if count == 0 {
+                throw CLIError(message: "Connection closed before relay auth challenge")
+            }
+            challengeData.append(scratch, count: count)
+            if challengeData.contains(0x0A) { break }
+        }
+
+        guard let challengeLine = String(data: challengeData.prefix(while: { $0 != 0x0A }), encoding: .utf8),
+              let challengeJSON = challengeLine.data(using: .utf8),
+              let challenge = try? JSONSerialization.jsonObject(with: challengeJSON) as? [String: Any],
+              let proto = challenge["protocol"] as? String, proto == "cmux-relay-auth",
+              let version = challenge["version"] as? Int, version == 1,
+              let serverRelayID = challenge["relay_id"] as? String, serverRelayID == relayID,
+              let nonce = challenge["nonce"] as? String, !nonce.isEmpty
+        else {
+            throw CLIError(message: "Invalid relay auth challenge")
+        }
+
+        // Compute HMAC-SHA256
+        guard let tokenData = hexData(from: relayToken), !tokenData.isEmpty else {
+            throw CLIError(message: "Invalid relay token format")
+        }
+        let message = Data("relay_id=\(relayID)\nnonce=\(nonce)\nversion=\(version)".utf8)
+        let key = SymmetricKey(data: tokenData)
+        let mac = HMAC<SHA256>.authenticationCode(for: message, using: key)
+        let macHex = Data(mac).map { String(format: "%02x", $0) }.joined()
+
+        // Send auth response
+        let response: [String: Any] = ["relay_id": relayID, "mac": macHex]
+        guard let responseData = try? JSONSerialization.data(withJSONObject: response) else {
+            throw CLIError(message: "Failed to encode relay auth response")
+        }
+        let payload = responseData + Data([0x0A])
+        try payload.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            let written = Darwin.write(socketFD, base, rawBuffer.count)
+            if written < 0 {
+                throw CLIError(message: "Failed to send relay auth response")
+            }
+        }
+
+        // Read auth result
+        var resultData = Data()
+        try configureReceiveTimeout(5.0)
+        while true {
+            let count = Darwin.read(socketFD, &scratch, scratch.count)
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw CLIError(message: "Failed to read relay auth result")
+            }
+            if count == 0 {
+                throw CLIError(message: "Connection closed during relay auth")
+            }
+            resultData.append(scratch, count: count)
+            if resultData.contains(0x0A) { break }
+        }
+
+        guard let resultLine = String(data: resultData.prefix(while: { $0 != 0x0A }), encoding: .utf8),
+              let resultJSON = resultLine.data(using: .utf8),
+              let resultObj = try? JSONSerialization.jsonObject(with: resultJSON) as? [String: Any],
+              let ok = resultObj["ok"] as? Bool, ok
+        else {
+            throw CLIError(message: "Relay auth rejected")
+        }
+    }
+
+    private func sendViaHTTP(command: String, url: URL, relayID: String, relayToken: String) throws -> String {
+        guard let tokenData = hexData(from: relayToken), !tokenData.isEmpty else {
+            throw CLIError(message: "Invalid relay token format")
+        }
+
+        // Generate a client nonce and compute HMAC
+        var nonceBytes = [UInt8](repeating: 0, count: 16)
+        _ = SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes)
+        let nonce = nonceBytes.map { String(format: "%02x", $0) }.joined()
+
+        let message = Data("relay_id=\(relayID)\nnonce=\(nonce)\nversion=1".utf8)
+        let key = SymmetricKey(data: tokenData)
+        let mac = HMAC<SHA256>.authenticationCode(for: message, using: key)
+        let macHex = Data(mac).map { String(format: "%02x", $0) }.joined()
+
+        let body: [String: Any] = [
+            "relay_id": relayID,
+            "mac": macHex,
+            "nonce": nonce,
+            "command": command
+        ]
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
+            throw CLIError(message: "Failed to encode HTTP relay request")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = bodyData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = Self.responseTimeoutSeconds
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var responseError: Error?
+        var httpStatusCode: Int?
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            responseData = data
+            responseError = error
+            httpStatusCode = (response as? HTTPURLResponse)?.statusCode
+            semaphore.signal()
+        }
+        task.resume()
+
+        let waitResult = semaphore.wait(timeout: .now() + Self.responseTimeoutSeconds + 1)
+        if waitResult != .success {
+            task.cancel()
+            throw CLIError(message: "HTTP relay request timed out")
+        }
+
+        if let error = responseError {
+            throw CLIError(message: "HTTP relay request failed: \(error.localizedDescription)")
+        }
+
+        guard let status = httpStatusCode else {
+            throw CLIError(message: "HTTP relay: no response")
+        }
+
+        guard let data = responseData else {
+            throw CLIError(message: "HTTP relay: empty response")
+        }
+
+        let responseString = String(data: data, encoding: .utf8) ?? ""
+
+        guard status == 200 else {
+            throw CLIError(message: "HTTP relay error (\(status)): \(responseString)")
+        }
+
+        // Strip trailing newline to match raw socket behavior
+        var result = responseString
+        if result.hasSuffix("\n") {
+            result.removeLast()
+        }
+        return result
+    }
+
+    private func hexData(from string: String) -> Data? {
+        let normalized = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count.isMultiple(of: 2), !normalized.isEmpty else { return nil }
+        var data = Data(capacity: normalized.count / 2)
+        var cursor = normalized.startIndex
+        while cursor < normalized.endIndex {
+            let next = normalized.index(cursor, offsetBy: 2)
+            guard let byte = UInt8(normalized[cursor..<next], radix: 16) else { return nil }
+            data.append(byte)
+            cursor = next
+        }
+        return data
     }
 
     private func configureReceiveTimeout(_ timeout: TimeInterval) throws {
@@ -2705,6 +2997,18 @@ struct CMUXCLI {
         explicitPassword: String?,
         socketPath: String
     ) throws {
+        if client.isTCP {
+            let env = ProcessInfo.processInfo.environment
+            let relayID = env["CMUX_RELAY_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let relayToken = env["CMUX_RELAY_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if relayID.isEmpty || relayToken.isEmpty {
+                throw CLIError(message: "TCP relay requires CMUX_RELAY_ID and CMUX_RELAY_TOKEN environment variables")
+            }
+            // Use HTTP POST relay (works through HTTP proxies like sbx)
+            client.configureHTTPRelay(relayID: relayID, relayToken: relayToken)
+            return
+        }
+
         if let socketPassword = SocketPasswordResolver.resolve(
             explicit: explicitPassword,
             socketPath: socketPath
@@ -13080,8 +13384,11 @@ struct CMUXCLI {
                               ALL commands (send, list-panels, new-split, notify, etc.).
           CMUX_TAB_ID         Optional alias used by `tab-action`/`rename-tab` as default --tab.
           CMUX_SURFACE_ID     Auto-set in cmux terminals. Used as default --surface.
-          CMUX_SOCKET_PATH    Override the Unix socket path. Without this, the CLI defaults
-                              to ~/Library/Application Support/cmux/cmux.sock and auto-discovers tagged/debug sockets.
+          CMUX_SOCKET_PATH    Socket address. Unix path or host:port for TCP relay. Without this,
+                              the CLI defaults to ~/Library/Application Support/cmux/cmux.sock
+                              and auto-discovers tagged/debug sockets.
+          CMUX_RELAY_ID       Relay ID for TCP HMAC authentication (required for TCP connections).
+          CMUX_RELAY_TOKEN    Relay token (hex) for TCP HMAC authentication (required for TCP connections).
         """
     }
 

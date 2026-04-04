@@ -51,6 +51,9 @@ class TerminalController {
     private var clientHandlers: [Int32: Thread] = [:]
     private var tabManager: TabManager?
     private var accessMode: SocketControlMode = .cmuxOnly
+    private nonisolated(unsafe) var tcpRelayServer: CLIRelayServer?
+    nonisolated(unsafe) var tcpRelayPort: Int?
+    nonisolated(unsafe) var tcpRelayCredentials: RelayCredentialStore.Credentials?
     private let myPid = getpid()
     private nonisolated(unsafe) static var socketCommandPolicyDepth: Int = 0
     private nonisolated(unsafe) static var socketCommandFocusAllowanceStack: [Bool] = []
@@ -1032,6 +1035,40 @@ class TerminalController {
         Thread.detachNewThread { [weak self] in
             self?.acceptLoop(listenerSocket: listenerSocket, generation: generation)
         }
+
+        // Start TCP relay for container/network access if enabled
+        startTCPRelayIfEnabled(localSocketPath: activeSocketPath)
+    }
+
+    private func startTCPRelayIfEnabled(localSocketPath: String) {
+        let environment = ProcessInfo.processInfo.environment
+        let envEnabled = environment["CMUX_TCP_RELAY"] == "1"
+        let userEnabled = UserDefaults.standard.bool(forKey: "tcpRelayEnabled")
+        guard envEnabled || userEnabled else { return }
+
+        let envPort = environment["CMUX_TCP_RELAY_PORT"].flatMap(Int.init) ?? 0
+        let userPort = UserDefaults.standard.integer(forKey: "tcpRelayPort")
+        let port = envPort > 0 ? envPort : (userPort > 0 ? userPort : 9999)
+
+        let envHost = environment["CMUX_TCP_RELAY_HOST"]
+        let userHost = UserDefaults.standard.string(forKey: "tcpRelayHost")
+        let host = (envHost != nil && !envHost!.isEmpty) ? envHost! : (userHost != nil && !userHost!.isEmpty) ? userHost! : "0.0.0.0"
+
+        let credentials = RelayCredentialStore.loadOrCreate()
+        do {
+            let server = try CLIRelayServer(
+                localSocketPath: localSocketPath,
+                relayID: credentials.relayID,
+                relayTokenHex: credentials.relayToken
+            )
+            let boundPort = try server.start(host: host, port: port)
+            tcpRelayServer = server
+            tcpRelayPort = boundPort
+            tcpRelayCredentials = credentials
+            print("TerminalController: TCP relay listening on \(host):\(boundPort)")
+        } catch {
+            print("TerminalController: Failed to start TCP relay: \(error.localizedDescription)")
+        }
     }
 
     nonisolated func socketListenerHealth(expectedSocketPath: String) -> SocketListenerHealth {
@@ -1158,6 +1195,11 @@ class TerminalController {
             close(socketToClose)
         }
         unlink(socketPathToUnlink)
+
+        tcpRelayServer?.stop()
+        tcpRelayServer = nil
+        tcpRelayPort = nil
+        tcpRelayCredentials = nil
     }
 
     private nonisolated func unlinkSocketPathIfListenerStillInactive(_ path: String) {

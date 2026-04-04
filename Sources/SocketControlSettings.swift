@@ -678,3 +678,59 @@ struct SocketControlSettings {
         return userMode
     }
 }
+
+enum RelayCredentialStore {
+    private static let directoryName = "cmux"
+    private static let fileName = "relay-credentials.json"
+
+    struct Credentials {
+        let relayID: String
+        let relayToken: String
+    }
+
+    static func credentialsFileURL() -> URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return appSupport
+            .appendingPathComponent(directoryName, isDirectory: true)
+            .appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    static func load() -> Credentials? {
+        guard let url = credentialsFileURL(),
+              let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let relayID = json["relay_id"], !relayID.isEmpty,
+              let relayToken = json["relay_token"], !relayToken.isEmpty
+        else {
+            return nil
+        }
+        return Credentials(relayID: relayID, relayToken: relayToken)
+    }
+
+    static func loadOrCreate() -> Credentials {
+        if let existing = load() {
+            return existing
+        }
+
+        let relayID = UUID().uuidString.lowercased()
+        var tokenBytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, tokenBytes.count, &tokenBytes)
+        let relayToken = tokenBytes.map { String(format: "%02x", $0) }.joined()
+
+        let credentials = Credentials(relayID: relayID, relayToken: relayToken)
+
+        if let url = credentialsFileURL() {
+            let dir = url.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+            let json: [String: String] = ["relay_id": relayID, "relay_token": relayToken]
+            if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600])
+            }
+        }
+
+        return credentials
+    }
+}
