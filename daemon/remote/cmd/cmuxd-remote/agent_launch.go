@@ -668,10 +668,13 @@ func claudeTeamsLaunchArgs(args []string) []string {
 	var result []string
 	hasPaneTools := false
 	hasTeammateMode := false
-	// Strip --pane-tools from args (it's a cmux flag, not a claude flag)
+	// Strip cmux-only flags from args before passing to claude
 	for _, arg := range args {
 		if arg == "--pane-tools" {
 			hasPaneTools = true
+			continue
+		}
+		if arg == "--dangerously-skip-permissions" {
 			continue
 		}
 		if arg == "--teammate-mode" || strings.HasPrefix(arg, "--teammate-mode=") {

@@ -2887,6 +2887,7 @@ private struct SidebarDebugView: View {
     @AppStorage(SidebarActiveTabIndicatorSettings.styleKey)
     private var sidebarActiveTabIndicatorStyle = SidebarActiveTabIndicatorSettings.defaultStyle.rawValue
     @AppStorage("sidebarSelectionColorHex") private var sidebarSelectionColorHex: String?
+    @AppStorage("accentColorHex") private var accentColorHex: String?
 
     private var selectedSidebarIndicatorStyle: SidebarActiveTabIndicatorStyle {
         SidebarActiveTabIndicatorSettings.resolvedStyle(rawValue: sidebarActiveTabIndicatorStyle)
@@ -2910,6 +2911,22 @@ private struct SidebarDebugView: View {
             set: { newColor in
                 let nsColor = NSColor(newColor)
                 sidebarSelectionColorHex = nsColor.hexString()
+            }
+        )
+    }
+
+    private var accentColorBinding: Binding<Color> {
+        Binding(
+            get: {
+                if let hex = accentColorHex, let nsColor = NSColor(hex: hex) {
+                    return Color(nsColor: nsColor)
+                }
+                // Default blue when no custom accent is set
+                return Color(nsColor: NSColor(srgbRed: 0, green: 145.0 / 255.0, blue: 1.0, alpha: 1.0))
+            },
+            set: { newColor in
+                let nsColor = NSColor(newColor)
+                accentColorHex = nsColor.hexString()
             }
         )
     }
@@ -3012,6 +3029,23 @@ private struct SidebarDebugView: View {
                             x: $paneShortcutHintXOffset,
                             y: $paneShortcutHintYOffset
                         )
+                    }
+                    .padding(.top, 2)
+                }
+
+                GroupBox("Accent Color") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ColorPicker(String(localized: "sidebar.debug.accentColor", defaultValue: "Accent Color"), selection: accentColorBinding, supportsOpacity: false)
+                        Text(String(localized: "sidebar.debug.accentColor.description", defaultValue: "Controls the tab indicator, pane flash, drop zones, and notification badges."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if accentColorHex != nil {
+                            Button(String(localized: "sidebar.debug.resetAccentColor", defaultValue: "Reset to Default")) {
+                                accentColorHex = nil
+                            }
+                            .font(.caption)
+                        }
                     }
                     .padding(.top, 2)
                 }

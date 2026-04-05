@@ -9519,10 +9519,13 @@ struct CMUXCLI {
         var result: [String] = []
         var hasPaneTools = false
         let hasTeammateMode = claudeTeamsHasExplicitTeammateMode(commandArgs: commandArgs)
-        // Strip --pane-tools from args (it's a cmux flag, not a claude flag)
+        // Strip cmux-only flags from args before passing to claude
         for arg in commandArgs {
             if arg == "--pane-tools" {
                 hasPaneTools = true
+                continue
+            }
+            if arg == "--dangerously-skip-permissions" {
                 continue
             }
             result.append(arg)
@@ -11355,7 +11358,6 @@ struct CMUXCLI {
                 fallback: workspaceArg,
                 client: client
             )
-            _ = try sendV1Command("clear_notifications --tab=\(workspaceId)", client: client)
             try setClaudeStatus(
                 client: client,
                 workspaceId: workspaceId,

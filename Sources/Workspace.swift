@@ -5698,7 +5698,8 @@ final class Workspace: Identifiable, ObservableObject {
                 backgroundHex: Self.bonsplitChromeHex(
                     backgroundColor: backgroundColor,
                     backgroundOpacity: backgroundOpacity
-                )
+                ),
+                accentHex: UserDefaults.standard.string(forKey: "accentColorHex")
             ),
             fontScale: resolvedFontScale
         )

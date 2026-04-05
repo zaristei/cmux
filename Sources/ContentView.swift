@@ -41,6 +41,10 @@ func sidebarActiveForegroundNSColor(
 }
 
 func cmuxAccentNSColor(for colorScheme: ColorScheme) -> NSColor {
+    if let hex = UserDefaults.standard.string(forKey: "accentColorHex"),
+       let custom = NSColor(hex: hex) {
+        return custom
+    }
     switch colorScheme {
     case .dark:
         return NSColor(
